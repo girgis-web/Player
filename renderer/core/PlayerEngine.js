@@ -1,132 +1,140 @@
-// renderer/core/PlayerEngine.js
+// renderer/core/PlayerEngine.js - Refactored Modular Architecture
 import { PlayerState } from "./PlayerState.js";
 import { logInfo, logError } from "../utils/logger.js";
-
-import { registerDisplayIfNeeded, getDisplayInfo } from "../services/displayService.js";
-import { syncScreens, setupRealtimeScreenEvents } from "../services/screenService.js";
-import { loadPlaylistForDisplay } from "../services/playlistService.js";
-import { startHeartbeat } from "../services/heartbeatService.js";
-import { startRenderLoop } from "../render/RenderEngine.js";
-
-import { PairingScreen } from "../render/components/PairingScreen.js";
-import { WaitingScreens } from "../render/components/WaitingScreen.js";
-
+import { PairingScreen, WaitingScreen, ErrorScreen } from "../render/components/ScreenComponents.js";
 import { createVirtualCanvas } from "../render/VirtualCanvas.js";
-import { computeScreenMapping } from "../services/mappingService.js";
-import { startCommandListener } from "../services/commandService.js";
-
+import { startRenderLoop } from "../render/RenderEngine.js";
+import { preloadAssets } from "../cache/preloader.js";
 import { savePlaylistToCache, loadPlaylistFromCache } from "../offline/cacheService.js";
 import { isOffline } from "../offline/offlineGuard.js";
 
-import { preloadAssets } from "../cache/preloader.js";
-import { getCachedAsset } from "../cache/assetCache.js";
+// Service imports
+import { DisplayManager } from "../services/DisplayManager.js";
+import { PlaylistManager } from "../services/PlaylistManager.js";
+import { HealthManager } from "../services/HealthManager.js";
+import { CommandManager } from "../services/CommandManager.js";
 
 export function createPlayerEngine(env, initialConfig, setPlayerContent) {
+  // Initialize managers
+  const displayManager = new DisplayManager(env, initialConfig);
+  const playlistManager = new PlaylistManager();
+  const healthManager = new HealthManager(env);
+  const commandManager = new CommandManager();
+
+  let config = { ...initialConfig };
+
   async function init() {
     try {
       PlayerState.setMode("boot");
-      logInfo("PlayerEngine init");
+      logInfo("PlayerEngine initialization started");
 
-      let config = { ...initialConfig };
+      // Step 1: Handle display registration and pairing
+      const displaySetup = await setupDisplay();
+      if (!displaySetup.success) return;
 
-      // 1) Registrazione display se necessario
-      const regResult = await registerDisplayIfNeeded(env, config);
+      // Step 2: Setup virtual canvas and wall configuration
+      const canvasSetup = await setupCanvas(displaySetup.displayInfo);
+      if (!canvasSetup.success) return;
+
+      // Step 3: Start health monitoring and command listening
+      startSystemServices();
+
+      // Step 4: Load and render content
+      await loadAndRenderContent();
+
+      logInfo("PlayerEngine initialization complete");
+    } catch (err) {
+      logError("Critical error in PlayerEngine init:", err);
+      PlayerState.setMode("error");
+      setPlayerContent(ErrorScreen("Critical player error. Please restart."));
+    }
+  }
+
+  async function setupDisplay() {
+    try {
+      // Register display if needed
+      const regResult = await displayManager.registerIfNeeded();
+      
       if (!regResult.displayId_Found) {
-        // Nessun displayId: mostro pairing screen e MI FERMO
         PlayerState.setMode("pairing");
-        const payload = `signage://pair/${regResult.pairingCode}`;
-        setPlayerContent(PairingScreen(regResult.pairingCode, payload));
-        return;
+        const html = await PairingScreen(regResult.pairingCode);
+        setPlayerContent(html);
+        return { success: false };
       }
 
       config = regResult.config;
 
-      // 2) Ottieni info display dal backend + Supabase
-      const displayInfo = await getDisplayInfo(env, config);
+      // Get display info from backend
+      const displayInfo = await displayManager.getDisplayInfo();
       PlayerState.setDisplayInfo(displayInfo);
 
-      // 2.1) OFFLINE MODE — va gestita come priorità assoluta
+      // Handle offline mode
       if (displayInfo?.offline === true) {
-        logInfo("Avvio in modalità offline (nessun backend)");
-
-        // In offline, usiamo il root come "canvas logico" minimo
-        if (!window.VirtualCanvas) {
-          const root = document.getElementById("root");
-          window.VirtualCanvas = root;
-        }
-
-        // Tentiamo periodicamente di riconnetterci al backend
-        startBackendRetry(env, config);
-
-        await reloadPlaylistAndRender(config);
-        return;
+        logInfo("Starting in offline mode (no backend)");
+        setupOfflineMode();
+        await loadAndRenderContent();
+        return { success: false };
       }
 
-      // 2.2) DisplayId non valido (eliminato da Supabase, ecc.)
+      // Handle invalid display
       if (!displayInfo.exists) {
-        logInfo("DisplayId non valido, reset già eseguito, riavvio il player tra 1s");
-
-        // getDisplayInfo DEVE aver già fatto:
-        // config.displayId = null; window.Config.saveConfig(config);
-        setTimeout(() => {
-          location.reload();
-        }, 1000);
-
-        return;
+        logInfo("Invalid displayId, resetting and reloading in 1s");
+        setTimeout(() => location.reload(), 1000);
+        return { success: false };
       }
 
-      // 2.3) Display esistente ma non ancora associato (pairing)
+      // Handle unpaired display
       if (displayInfo.unpaired) {
         PlayerState.setMode("pairing");
         const pairingCode = displayInfo.pairing_code || config.pairingCode;
-                const html = await PairingScreen(pairingCode);
-                setPlayerContent(html);
-        return;
+        const html = await PairingScreen(pairingCode);
+        setPlayerContent(html);
+        return { success: false };
       }
 
-      // Da qui in poi: display esiste, è paired e abbiamo displayInfo.display
+      // Validate display data
+      if (!displayInfo.display) {
+        logError("Missing display data despite exists=true, unpaired=false");
+        setPlayerContent(ErrorScreen("Display configuration error"));
+        return { success: false };
+      }
+
+      // Sync screens
+      await displayManager.syncScreens(displayInfo);
+      displayManager.setupRealtimeEvents();
+
+      return { success: true, displayInfo };
+    } catch (err) {
+      logError("Error in setupDisplay:", err);
+      setPlayerContent(ErrorScreen("Display setup failed"));
+      return { success: false };
+    }
+  }
+
+  async function setupCanvas(displayInfo) {
+    try {
       const display = displayInfo.display;
-      if (!display) {
-        logError("displayInfo.display mancante nonostante exists=true, unpaired=false");
-        setPlayerContent(`<div style="color:white;">Errore: display mancante</div>`);
-        return;
-      }
-
-      // 3) Sync screens (monitor fisici) e realtime
-      await syncScreens(config, displayInfo);
-      setupRealtimeScreenEvents(config);
-
-      // 4) Configurazione wall + VirtualCanvas
-      // QUI non usiamo più pixel_width/height sul display direttamente,
-      // ma lasciamo la responsabilità al mapping RPC (wall)
       const wallId = display.wall_id;
 
       if (!wallId) {
-        logError("Display senza wall associato (wall_id null)");
-        setPlayerContent(
-          `<div style="color:white;font-size:32px;">
-            Display associato ma nessun wall configurato.<br/>
-            Configura un wall nel backend.
-           </div>`
-        );
-        return;
+        logError("Display without associated wall (wall_id null)");
+        setPlayerContent(WaitingScreen());
+        return { success: false };
       }
 
-      const mapping = await computeScreenMapping(wallId);
+      // Get wall configuration
+      const mapping = await displayManager.getWallConfiguration(wallId);
       if (!mapping) {
-        setPlayerContent(
-          `<div style="color:white;font-size:32px;">
-            Configurazione wall non disponibile.<br/>
-            Verifica la RPC get_wall_configuration e il mapping nel backend.
-           </div>`
-        );
-        return;
+        setPlayerContent(ErrorScreen("Wall configuration unavailable. Please configure in backend."));
+        return { success: false };
       }
 
+      // Store mapping in PlayerState
       PlayerState.wall = mapping.wall;
       PlayerState.screens = mapping.screens;
       PlayerState.mapping = mapping.mapping;
 
+      // Create virtual canvas
       const wallConfig = {
         pixel_width: mapping.wall?.pixel_width || 1920,
         pixel_height: mapping.wall?.pixel_height || 1080
@@ -136,36 +144,54 @@ export function createPlayerEngine(env, initialConfig, setPlayerContent) {
       document.body.appendChild(canvas);
       window.VirtualCanvas = canvas;
 
-      // 5) Heartbeat + command listener
-      startHeartbeat(env, config.displayId);
-      startCommandListener(config, { reloadPlaylistAndRender, forceScene });
-
-      // 6) Playlist + render loop
-      await reloadPlaylistAndRender(config);
-
+      return { success: true };
     } catch (err) {
-      logError("Errore critico in init PlayerEngine:", err);
-      PlayerState.setMode("error");
-      setPlayerContent(`<div style="color:white;">Errore critico player</div>`);
+      logError("Error in setupCanvas:", err);
+      setPlayerContent(ErrorScreen("Canvas setup failed"));
+      return { success: false };
     }
   }
 
-  function startBackendRetry(env, config) {
+  function startSystemServices() {
+    try {
+      // Start health monitoring
+      healthManager.startHeartbeat(config.displayId);
+
+      // Start command listener
+      commandManager.startListener(config.displayId, {
+        reloadPlaylist: loadAndRenderContent,
+        forceScene: handleForceScene
+      });
+
+      logInfo("System services started");
+    } catch (err) {
+      logError("Error starting system services:", err);
+    }
+  }
+
+  function setupOfflineMode() {
+    if (!window.VirtualCanvas) {
+      const root = document.getElementById("root");
+      window.VirtualCanvas = root;
+    }
+    startBackendRetry();
+  }
+
+  function startBackendRetry() {
     setInterval(async () => {
       try {
-        const info = await getDisplayInfo(env, config);
-
+        const info = await displayManager.getDisplayInfo();
         if (!info.offline) {
-          logInfo("Backend tornato online, riavvio player");
+          logInfo("Backend back online, reloading player");
           location.reload();
         }
       } catch (err) {
-        // backend ancora offline, silenzio
+        // Backend still offline, silent
       }
-    }, 50000); // ogni 50 secondi
+    }, 50000); // Every 50 seconds
   }
 
-  async function reloadPlaylistAndRender(config) {
+  async function loadAndRenderContent() {
     let playlist = null;
 
     try {
@@ -173,7 +199,7 @@ export function createPlayerEngine(env, initialConfig, setPlayerContent) {
         logInfo("Offline mode detected, loading from cache...");
         playlist = loadPlaylistFromCache();
       } else {
-        playlist = await loadPlaylistForDisplay(config.displayId);
+        playlist = await playlistManager.loadForDisplay(config.displayId);
         if (playlist) {
           savePlaylistToCache(playlist);
           logInfo("Playlist saved to cache for offline robustness");
@@ -184,12 +210,12 @@ export function createPlayerEngine(env, initialConfig, setPlayerContent) {
       playlist = loadPlaylistFromCache();
     }
 
-    if (!playlist) {
+    if (!playlist || playlist.length === 0) {
       logError("Critical: No playlist available (online or offline)");
-      setPlayerContent(`<div style="color:white;font-size:48px;background:black;height:100vh;display:flex;align-items:center;justify-content:center;">Offline - No Cache Content Available</div>`);
+      setPlayerContent(ErrorScreen("Offline - No Cache Content Available"));
       
       // Retry logic if no content at all
-      setTimeout(() => reloadPlaylistAndRender(config), 30000);
+      setTimeout(() => loadAndRenderContent(), 30000);
       return;
     }
 
@@ -205,15 +231,19 @@ export function createPlayerEngine(env, initialConfig, setPlayerContent) {
     }
   }
 
-  async function forceScene(sceneId) {
-    PlayerState.clearRenderTimeout();
-    const html = `<div style="color:white;font-size:48px;">Scene ${sceneId}</div>`;
-    setPlayerContent(html);
+  async function handleForceScene(sceneId) {
+    try {
+      PlayerState.clearRenderTimeout();
+      const html = `<div style="color:white;font-size:48px;">Scene ${sceneId}</div>`;
+      setPlayerContent(html);
+    } catch (err) {
+      logError("Error forcing scene:", err);
+    }
   }
 
   return {
     init,
-    reloadPlaylistAndRender,
-    forceScene
+    reloadPlaylist: loadAndRenderContent,
+    forceScene: handleForceScene
   };
 }
