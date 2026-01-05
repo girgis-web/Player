@@ -63,3 +63,7 @@ node_modules/electron/dist/electron
 *.env
 *.env.*
 dashboard/node_modules/@next/swc-linux-x64-gnu/next-swc.linux-x64-gnu.node
+-e 
+# Environment files
+*.env
+*.env.*
