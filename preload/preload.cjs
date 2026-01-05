@@ -40,7 +40,7 @@ async function getCachedContentInternal(content) {
 
 function deleteCachedContentInternal(contentId) {
   const filePath = path.join(CACHE_DIR, contentId);
-  if (fs.exists.existsSync(filePath)) fs.unlinkSync(filePath);
+  if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
 }
 
 // 3) CONFIG
