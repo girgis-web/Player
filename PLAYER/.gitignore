@@ -1,0 +1,65 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+
+# Electron
+out/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Cache
+.cache/
+*.cache
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+
+# Player specific
+DigitalSignageCache/
+preload/player-config.json
+
+# Testing
+coverage/
+
+# Temporary
+temp/
+tmp/
+
+# DO NOT INCLUDE
+dashboard/
+frontend/
+backend/
+player-repo/node_modules/electron/dist/electron
+node_modules/electron/dist/electron
+-e 
+# Environment files
+*.env
+*.env.*
+-e 
+# Environment files
+*.env
+*.env.*
+-e 
+# Environment files
+*.env
+*.env.*
+dashboard/node_modules/@next/swc-linux-x64-gnu/next-swc.linux-x64-gnu.node
