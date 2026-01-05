@@ -7,7 +7,11 @@
   "main": "main/main.cjs",
   "scripts": {
     "start": "electron --no-sandbox --disable-gpu-sandbox .",
-    "build": "electron-builder -c electron-builder.yml"
+    "build": "electron-builder -c electron-builder.yml",
+    "test": "node tests/run-tests.cjs",
+    "test:pairing": "node tests/pairing-test.cjs",
+    "validate": "node scripts/validate-build.cjs",
+    "prebuild": "npm run validate"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.89.0",
